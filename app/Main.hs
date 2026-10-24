@@ -6,7 +6,7 @@ module Main where
 
 import qualified Data.ByteString.Char8 as BS
 import Data.Maybe (fromJust, isNothing, fromMaybe)
-import Control.Monad
+import Control.Monad ( replicateM_, unless, forM_, when )
 import Data.List (group, sort, minimumBy, elemIndex, sortBy, findIndices, maximumBy, findIndex, foldl', scanl', elemIndices, find, groupBy, isPrefixOf, tails, transpose)
 import qualified Data.Vector.Mutable as MV
 import qualified Data.Vector.Unboxed.Mutable as MUV
@@ -15,23 +15,19 @@ import qualified Data.Vector.Unboxed as UV
 import qualified Data.Sequence as Seq
 import Data.Sequence (Seq((:<|), (:|>)), (|>), (><))
 import Control.Monad.ST (runST, ST, RealWorld)
-import Data.STRef
+import Data.STRef ( modifySTRef, newSTRef, readSTRef, writeSTRef, STRef )
 import Text.Printf (printf)
 import Data.Ord (comparing, Down (Down))
 import qualified Data.IntMap.Strict as IM
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 import qualified Data.Map as M
-import qualified Data.Heap as H
+-- import qualified Data.Heap as H
 import Data.Char (digitToInt, intToDigit, ord)
 import Data.Bits (xor, (.&.), (.|.), shiftL, shiftR)
 import qualified Data.Set as S
 import qualified Data.IntSet as IS
 import Debug.Trace (trace, traceShow, traceM, traceShowM)
-import GHC.STRef (STRef(STRef))
-import Data.Functor.Product (Product(Pair))
--- import qualified Data.STRef as SR
--- import qualified Data.IORef as IR
 
 type Pair = (Int, Int)
 type Triple = (Int, Int, Int)
@@ -49,75 +45,6 @@ readInteger = fst . fromJust . BS.readInteger
 chunk :: Int -> [a] -> [[a]]
 chunk _ [] = []
 chunk n xs = take n xs : chunk n (drop n xs)
-
-alp :: Char -> Int
-alp x = HM.fromList (zip ['A' .. 'Z'] [0 .. ]) HM.! x
-
--- binSearch :: UV.Unbox a => UV.Vector a -> (a -> Bool) -> Pair
--- binSearch v p = (left, right)
---     where
---         mini = p $ UV.head v
---         maxi = p $ UV.last v
---         len = UV.length v
-
---         left = le (0, len-1)
---         right = re (0, len-1)
-
---         le :: Pair -> Int
---         le (l, r)
---             | mini = -1
---             | r - l <= 1 = l
---             | otherwise = if midVal
---                 then le (mid, r)
---                 else le (l, mid)
---                 where
---                     mid = div (l + r) 2
---                     midVal = p $ v UV.! mid
-
---         re :: Pair -> Int
---         re (l, r)
---             | maxi = len
---             | r - l <= 1 = r
---             | otherwise = if midVal
---                 then re (l, mid)
---                 else re (mid, r)
---                 where
---                     mid = div (l + r) 2
---                     midVal = p $ v UV.! mid
-
--- binSearch :: UV.Unbox a => UV.Vector a -> (a -> Int) -> Int -> (Pair, Pair)
--- binSearch v p k
---     | mini == GT = ((-1,-1), (-1,-1))
---     | maxi == LT = ((len,len), (len,len))
---     | otherwise = (left, right)
---         where
---             [mini, maxi] = map ((`compare` k) . p) [UV.head v, UV.last v]
---             len = UV.length v
-
---             left = le (0, len-1)
---             right = re (0, len-1)
-
---             le :: Pair -> Pair
---             le (l, r)
---                 | mini == EQ = (-1, 0)
---                 | r - l <= 1 = (l, r)
---                 | otherwise = if midVal < k
---                     then le (mid, r)
---                     else le (l, mid)
---                     where
---                         mid = div (l + r) 2
---                         midVal = p $ v UV.! mid
-
---             re :: Pair -> Pair
---             re (l, r)
---                 | maxi == EQ = (len-1, len)
---                 | r - l <= 1 = (l, r)
---                 | otherwise = if midVal > k
---                     then re (l, mid)
---                     else re (mid, r)
---                     where
---                         mid = div (l + r) 2
---                         midVal = p $ v UV.! mid
 
 binSearch :: UV.Vector Int -> (Int -> Int) -> Int -> (Pair, Pair)
 binSearch v p k
@@ -240,6 +167,36 @@ long Deque {..} = do
     b <- readSTRef back
     return (b - f)
 
+--Heap
+data Heap s a = Heap {
+    heapSeg :: SegTree s (Int, a),
+    heapBack :: STRef s Int,
+    heapSize :: Int
+}
+
+newHeap :: (UV.Unbox a, Eq a) => Int -> (a -> a -> a) -> a -> ST s (Heap s a)
+newHeap size op e = do
+    let op' (i,x) (j,y) = let sel = op x y in if sel == x then (i,x) else (j,y)
+    seg <- newSegTree op' (-1, e) (replicate size (-1, e))
+    back <- newSTRef 0
+    return $ Heap { heapSeg = seg, heapBack = back, heapSize = size }
+
+enHeap :: (UV.Unbox a, Eq a) => a -> Heap s a -> ST s ()
+enHeap x Heap {..} = do
+    back <- readSTRef heapBack
+    updateSegTree heapSeg back (back, x)
+    writeSTRef heapBack (back + 1)
+
+deHeap :: (UV.Unbox a, Eq a) => Heap s a -> ST s a
+deHeap Heap {..} = do
+    (i, res) <- querySegTree heapSeg (0,heapSize)
+    updateSegTree heapSeg i (segId heapSeg)
+    return res
+
+emptyHeap :: (UV.Unbox a, Eq a) => Heap s a -> ST s Bool
+emptyHeap Heap {..} = do
+    (i, _) <- querySegTree heapSeg (0,heapSize)
+    return (i == -1)
 
 --Segmented Tree
 data SegTree s a = SegTree {
@@ -334,6 +291,25 @@ x |>> f = f x
 
 prefixIndices :: String -> String -> [Int]
 prefixIndices s t = findIndices (isPrefixOf t) (tails s)
+
+prime :: Int -> UV.Vector Int
+prime n = runST $ do
+    muv <- MUV.replicate (n+1) True :: ST s (MUV.MVector s Bool)
+    MUV.write muv 0 False
+    MUV.write muv 1 False
+
+    let g i
+            | i > n = pure ()
+            | otherwise = do
+                b <- MUV.read muv i
+                when b $ do
+                    forM_ [2 .. div n i] $ \j -> do
+                        MUV.write muv (i*j) False
+
+                g (i+1)
+
+    g 2
+    UV.findIndices id <$> UV.freeze muv
 
 -- This is a template I use for AtCoder contests. The source code is available at https://github.com/pinattutaro/atcoder. -------------------------------------------------------------------------------------------------------------------
 
